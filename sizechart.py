@@ -33,6 +33,21 @@ def steps(origin, width, bias = 0.25):
         yield x
         x += step
 
+def mod_for(k):
+    if k in {key.LALT, key.RALT}:
+        return key.MOD_ALT
+    elif k in {key.LCOMMAND, key.RCOMMAND}:
+        return key.MOD_COMMAND
+    elif k in {key.LCTRL, key.RCTRL}:
+        return key.MOD_CTRL
+    elif k in {key.LOPTION, key.ROPTION}:
+        return key.MOD_OPTION
+    elif k in {key.LSHIFT, key.RSHIFT}:
+        return key.MOD_SHIFT
+    elif k in {key.LWINDOWS, key.RWINDOWS}:
+        return key.MOD_WINDOWS
+    return 0
+
 class Vec2:
     def __init__(self, x=0, y=0):
         self.x, self.y = x, y
@@ -66,6 +81,12 @@ class Vec2:
     def __rfloordiv__(self, lhs): return self.into(lhs).broadcast(operator.floordiv, self)
     def __mod__(self, rhs): return self.broadcast(operator.mod, self.into(rhs))
     def __rmod__(self, lhs): return self.into(lhs).broadcast(operator.mod, self)
+
+    def __eq__(self, rhs):
+        if not isinstance(rhs, type(self)): return NotImplemented
+        return self.x == rhs.x and self.y == rhs.y
+    def __ne__(self, rhs):
+        return not (self == rhs)
 
 class Canvas:
     def __init__(self, disp, origin = Vec2(), scale=0.01):
@@ -501,7 +522,7 @@ class App:
             y += 24
 
     def ev_key_press(self, key, mod):
-        self.mods = mod
+        self.mods = mod | mod_for(key)
         self.keystate(Event(
             type=pygame.KEYDOWN,
             key=key,
@@ -509,7 +530,7 @@ class App:
         ))
 
     def ev_key_release(self, key, mod):
-        self.mods = mod
+        self.mods = mod & ~mod_for(key)
         self.keystate(Event(
             type=pygame.KEYUP,
             key=key,
@@ -626,13 +647,16 @@ class App:
                 self.origy = self.sprites[self.selection].y
                 self.origmy = self.mpos.y
                 self.keystate = self.ks_move
+                self.undo_state = self.origy
             elif ev.key == key.S and self.selection is not None:
                 self.origmy = self.mpos.y
                 self.keystate = self.ks_scale
+                self.undo_state = self.sprites[self.selection].scale
             elif ev.key == key.O and self.selection is not None:
                 if self.selection > 0:
                     self.origmx = self.mpos.x
                     self.keystate = self.ks_offset
+                    self.undo_state = self.sprites[self.selection - 1].olap
                 else:
                     self.message = "Can't offset the first sprite"
             elif ev.key == key.D and self.selection is not None:
@@ -692,6 +716,8 @@ class App:
     def ks_move(self, ev):
         spr = self.sprites[self.selection]
         if ev.type == pygame.MOUSEBUTTONDOWN:
+            if ev.button == mouse.RIGHT:
+                spr.y = self.undo_state
             self.keystate = self.ks_default
         elif ev.type == pygame.MOUSEMOTION:
             d = self.canvas.unmap_scaled(Vec2(0, ev.pos.y - self.origmy))
@@ -700,6 +726,8 @@ class App:
     def ks_scale(self, ev):
         spr = self.sprites[self.selection]
         if ev.type == pygame.MOUSEBUTTONDOWN:
+            if ev.button == mouse.RIGHT:
+                spr.scale = self.undo_state
             self.keystate = self.ks_default
         elif ev.type == pygame.MOUSEMOTION:
             d = ev.pos.y - self.origmy
@@ -710,11 +738,13 @@ class App:
             elif self.mods & key.MOD_SHIFT:
                 base = 1.1
             spr.scale *= base**d
-            print(f'new scale: {spr.scale}')
+            #print(f'new scale: {spr.scale}')
 
     def ks_offset(self, ev):
         spr = self.sprites[self.selection - 1]
         if ev.type == pygame.MOUSEBUTTONDOWN:
+            if ev.button == mouse.RIGHT:
+                spr.olap = self.undo_state
             self.keystate = self.ks_default
         elif ev.type == pygame.MOUSEMOTION:
             dx = ev.pos.x - self.origmx
