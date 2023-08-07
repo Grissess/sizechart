@@ -5,8 +5,12 @@ import glob
 import traceback
 import os
 import operator
+import time
+from enum import Enum, auto
+from ctypes import byref
 
 import pyglet
+from pyglet.gl import *
 from pyglet.window import key, mouse
 from pygame import Rect
 import pygame
@@ -47,6 +51,10 @@ def mod_for(k):
     elif k in {key.LWINDOWS, key.RWINDOWS}:
         return key.MOD_WINDOWS
     return 0
+
+class RenderState(Enum):
+    NORMAL = auto()
+    IMAGE = auto()
 
 class Vec2:
     def __init__(self, x=0, y=0):
@@ -92,10 +100,17 @@ class Canvas:
     def __init__(self, disp, origin = Vec2(), scale=0.01):
         self.disp, self.origin, self.scale = disp, origin, scale
         self.font = pygame.font.Font(None, 24)
+        self.target_size = None
+
+    @property
+    def view_size(self):
+        if self.target_size is not None:
+            return self.target_size
+        return Vec2(*self.disp.get_size())
 
     @property
     def viewbox(self):
-        w, h = self.disp.get_size()
+        w, h = self.view_size
         x, y = self.origin
         return Rect(x, y, w / self.scale, h / self.scale)
 
@@ -178,10 +193,11 @@ class Canvas:
         ).draw()
 
 class Sprite:
-    def __init__(self, img, path, scale=1.0, olap = 0.75, y = 0.0, refy = None):
+    def __init__(self, img, path, scale=1.0, olap = 0.75, y = 0.0, refy = None, name = 'unnamed'):
         self.img, self.path, self.scale, self.olap, self.y = img, path, scale, olap, y
         self.sprite = pyglet.sprite.Sprite(img=self.img)
         self.refy = refy
+        self.name = name
         self.lastx = None
 
     @classmethod
@@ -190,14 +206,22 @@ class Sprite:
         try:
             surf = pyglet.image.load(path)
         except FileNotFoundError:
-            surf = pyglet.resource.image('notfound.png')
+            surf = pyglet.image.create(
+                int(elem.get(ns('sizechart', 'origWidth'), 256)),
+                int(elem.get(ns('sizechart', 'origHeight'), 256)),
+                pyglet.image.CheckerImagePattern(
+                    (255, 0, 255, 255),
+                    (0, 0, 0, 255),
+                ),
+            )
         scale = float(elem.get(ns('sizechart', 'scale'), 1.0))
         olap = float(elem.get(ns('sizechart', 'overlap'), 0.75))
         y = float(elem.get(ns('sizechart', 'offsetY'), 0.0))
         ry = elem.get(ns('sizechart', 'referenceY'))
         if ry is not None:
             ry = float(ry)
-        return cls(surf, path, scale, olap, y, ry)
+        name = elem.get(ns('sizechart', 'name'), 'unnamed')
+        return cls(surf, path, scale, olap, y, ry, name)
 
     REF_COLOR = (255, 0, 255)
     def draw(self, canv, x, app):
@@ -261,12 +285,141 @@ class Sprite:
                 ns('sizechart', 'scale'): str(self.scale),
                 ns('sizechart', 'overlap'): str(self.olap),
                 ns('sizechart', 'offsetY'): str(self.y),
+                ns('sizechart', 'name'): self.name,
                 ns('sizechart', 'role'): 'Sprite',
         }
         if self.refy is not None:
             attrs[ns('sizechart', 'referenceY')] = str(self.refy)
         tb.start(ns('svg', 'image'), attrs)
         tb.end(ns('svg', 'image'))
+
+class Viewport:
+    FBO = None
+
+    def __init__(self, name, rect, scale=1.0):
+        self.name = name
+        self.rect = rect
+        self.scale = scale
+
+    @property
+    def render_size(self):
+        return self.scale * Vec2(self.rect.w, self.rect.h)
+
+    def save(self, tb):
+        tb.start(ns('sizechart', 'viewport'), {
+            'x': str(self.rect.x),
+            'y': str(self.rect.y),
+            'width': str(self.rect.w),
+            'height': str(self.rect.h),
+            'scale': str(self.scale),
+            'name': self.name,
+            ns('sizechart', 'role'): 'Viewport',
+        })
+        tb.end(ns('sizechart', 'viewport'))
+
+    @classmethod
+    def from_element(cls, elem):
+        r = Rect(
+            int(elem.get('x', 0)),
+            int(elem.get('y', 0)),
+            int(elem.get('width', 1)),
+            int(elem.get('height', 1)),
+        )
+        return cls(
+            elem.get('name', 'unknown'),
+            r,
+            float(elem.get('scale', 1.0)),
+        )
+
+    SLACK = 5
+    def contains(self, cpt):
+        ox, oy = self.rect.x, self.rect.y
+        fx, fy = ox + self.rect.w, oy + self.rect.h
+        if (abs(cpt.x - ox) < self.SLACK or abs(cpt.x - fx) < self.SLACK) \
+                and oy <= cpt.y <= fy:
+            return True
+        if (abs(cpt.y - oy) < self.SLACK or abs(cpt.y - fy) < self.SLACK) \
+                and ox <= cpt.y <= fx:
+            return True
+        return False
+
+    @property
+    def invalid(self):
+        return self.rect.w <= 0 or self.rect.h <= 0
+
+    VP_COLOR = (0, 0, 255)
+    VP_INVALID = (255, 0, 0)
+    VP_SEL = (0, 255, 255)
+    def draw(self, canv, sel=False):
+        r = self.rect
+        if sel:
+            col = self.VP_SEL
+        elif self.invalid:
+            col = self.VP_INVALID
+        else:
+            col = self.VP_COLOR
+        canv.draw_rect(r, col)
+        canv.draw_text(
+            f'{self.rect.x},{self.rect.y}',
+            Vec2(r.x, r.y),
+            col,
+        )
+        canv.draw_text(
+            self.name,
+            Vec2(r.x + r.w, r.y),
+            col,
+            anchor_x = 'right',
+            anchor_y = 'top',
+        )
+        hx = r.x + r.w/2
+        hy = r.y + r.h/2
+        s = self.render_size
+        canv.draw_text(
+            f'{s.x}px ({r.w}px * {self.scale:.3f})',
+            Vec2(hx, r.y),
+            col,
+            anchor_y='top',
+            anchor_x='center',
+        )
+        canv.draw_text(
+            f'{s.y}px ({r.h}px * {self.scale:.3f}',
+            Vec2(r.x, hy),
+            col,
+            anchor_x='right',
+        )
+
+    def render(self, app):
+        if self.invalid:
+            return
+
+        if Viewport.FBO is None:
+            Viewport.FBO = GLuint(0)
+            glGenFramebuffers(1, byref(Viewport.FBO))
+
+        s = self.render_size
+        s.x, s.y = (math.ceil(i) for i in s)
+        glBindFramebuffer(GL_FRAMEBUFFER, Viewport.FBO)
+        tex = pyglet.image.Texture.create(s.x, s.y)
+        glFramebufferTexture2D(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_TEXTURE_2D, tex.id, 0)
+        
+        old_scale = app.canvas.scale
+        old_origin = app.canvas.origin
+        app.canvas.scale = self.scale
+        app.canvas.origin = Vec2(self.rect.x, self.rect.y)
+        app.canvas.target_size = self.render_size
+        app.canvas.disp.projection.set(s.x, s.y, s.x, s.y)
+        app.render(RenderState.IMAGE)
+        app.canvas.disp.projection.set(
+            *app.canvas.disp.get_size(),
+            *app.canvas.disp.get_framebuffer_size(),
+        )
+        app.canvas.target_size = None
+        app.canvas.origin = old_origin
+        app.canvas.scale = old_scale
+
+        glBindFramebuffer(GL_FRAMEBUFFER, 0)
+        glViewport(0, 0, *app.canvas.view_size)
+        tex.save(self.name)
 
 class Event:
     def __init__(self, **kwargs):
@@ -277,7 +430,8 @@ class App:
     def __init__(self, screen):
         self.canvas = Canvas(screen)
         self.sprites = []
-        self.selection = None
+        self.viewports = []
+        self.selection = []
         self.running = True
         self.keystate = self.ks_default
         self.grid_fore = False
@@ -327,6 +481,8 @@ class App:
 
         for spr in self.sprites:
             spr.save(tb, vh)
+        for vp in self.viewports:
+            vp.save(tb)
 
         tb.end(ns('svg', 'svg'))
         return ET.ElementTree(tb.close())
@@ -370,24 +526,35 @@ class App:
         ))
         del self.sprites[:]
         for child in root:
-            if child.get(ns('sizechart', 'role')) == 'Sprite':
+            role = child.get(ns('sizechart', 'role'))
+            if role == 'Sprite':
                 self.sprites.append(Sprite.from_element(child))
+            elif role == 'Viewport':
+                self.viewports.append(Viewport.from_element(child))
 
-    SEL_COLOR = (255, 128, 0)
-    def render(self):
+    SEL_PRIM_COLOR = (255, 128, 0)
+    SEL_COLOR = (128, 64, 0)
+    def render(self, rs=RenderState.NORMAL):
         self.canvas.clear()
         if not self.grid_fore:
             self.render_grid()
         x = 0.0
         for i, spr in enumerate(self.sprites):
             nx = spr.draw(self.canvas, x, self)
-            if i == self.selection:
-                spr.box(self.canvas, x, self.SEL_COLOR)
+            if spr in self.selection:
+                col = self.SEL_COLOR
+                if spr is self.primary_selection:
+                    col = self.SEL_PRIM_COLOR
+                spr.box(self.canvas, x, col)
             x = nx
+        if rs != RenderState.IMAGE:
+            for vp in self.viewports:
+                vp.draw(self.canvas, vp in self.selection)
         if self.grid_fore:
             self.render_grid()
-        self.render_mouse()
-        self.render_hud()
+        if rs != RenderState.IMAGE:
+            self.render_mouse()
+            self.render_hud()
 
     PIX_GRID_COLOR = (255, 255, 255)
     REAL_GRID_COLOR = (255, 255, 0)
@@ -428,10 +595,44 @@ class App:
 
     def hit_test(self, cpt):
         print(f'hit {cpt}')
-        for ix, spr in enumerate(self.sprites):
+        for vp in self.viewports:
+            if vp.contains(cpt):
+                return vp
+        for spr in self.sprites:
             if spr.contains(cpt):
-                return ix, spr
-        return None, None
+                return spr
+        return None
+
+    @property
+    def primary_selection(self):
+        if not self.selection:
+            return None
+        return self.selection[0]
+
+    def selection_is(self, kind):
+        return isinstance(self.primary_selection, kind)
+
+    def selection_has(self, kind):
+        return any(isinstance(sel, kind) for sel in self.selection)
+
+    def each_selected(self, kind):
+        for sel in self.selection:
+            if isinstance(sel, kind):
+                yield sel
+
+    def set_selection(self, obj):
+        self.selection = [obj]
+
+    def add_selection(self, obj):
+        self.remove_selection(obj)
+        self.selection.insert(obj, 0)
+
+    def remove_selection(self, obj):
+        while obj in self.selection:
+            self.selection.remove(obj)
+
+    def unselect(self):
+        self.selection = []
 
     MOUSE_COLOR = (0, 255, 255)
     def render_mouse(self):
@@ -462,8 +663,9 @@ class App:
     def render_hud(self):
         self.canvas.draw_text(
             self.message,
-            self.canvas.unmap_point(Vec2(0, self.canvas.disp.get_size()[1] - 12)),
+            self.canvas.unmap_point(Vec2(0, self.canvas.view_size.y - 12)),
             self.HUD_COLOR,
+            anchor_y = 'top',
         )
         #self.canvas.disp.fill(
         #    (0, 0, 0, 32),
@@ -483,8 +685,8 @@ class App:
             lines.extend([
                 f'Scale: {self.ppu}px/{self.unit}',
             ])
-        if self.selection is not None:
-            spr = self.sprites[self.selection]
+        if self.selection_is(Sprite):
+            spr = self.primary_selection
             sw, sh = spr.sprite.width, spr.sprite.height
             ref = None
             if spr.refy is not None:
@@ -497,8 +699,8 @@ class App:
                     u = self.unit
                 ref = f'{dy:.3f}{u} ({dry:.3f}{u} baseline)'
             lines.extend([
-                f'Index: {self.selection}',
                 f'Path: {spr.path}',
+                f'Name: {spr.name}',
                 f'Scale: {spr.scale:.3f}',
                 f'Y-offset: {spr.y:.3f}',
                 f'Rendered X: {spr.lastx:.3f}',
@@ -506,8 +708,18 @@ class App:
                 f'Pixel Size: {sw:.3f},{sh:.3f}',
                 f'Ref: {ref}',
             ])
+        elif self.selection_is(Viewport):
+            vp = self.primary_selection
+            rs = vp.render_size
+            lines.extend([
+                f'Name: {vp.name}',
+                f'Origin: {vp.rect.x},{vp.rect.y} px',
+                f'Real Size: {vp.rect.w} x {vp.rect.h} px',
+                f'Render Size: {rs.x} x {rs.y} px',
+                f'Scale: {vp.scale}',
+            ])
 
-        cw = self.canvas.disp.get_size()[0]
+        cw = self.canvas.view_size.x
         #mw = max(i.get_width() for i in surfs)
         #mw = 240
         #x = self.canvas.disp.get_size()[0] - mw
@@ -592,16 +804,36 @@ class App:
                 self.buffer = self.buffer[:-1]
 
     def sel_offset(self, ds):
-        if not self.sprites:
-            self.selection = None
-        else:
-            if self.selection is None:
-                self.selection = 0 if ds > 0 else (len(self.sprites) - 1)
+        if (not self.selection) and self.sprites:
+            if ds > 0:
+                self.set_selection(self.sprites[0])
             else:
-                self.selection = (self.selection + ds) % len(self.sprites)
+                self.set_selection(self.sprites[-1])
+            return
+        try:
+            index = self.sprites.index(self.primary_selection)
+        except ValueError:
+            return
+        place = index + ds
+        if place < 0 or place >= len(self.sprites):
+            return
+        self.set_selection(self.sprites[place])
 
     def add_to_buffer(self, ev):
         pass
+
+    def bump_sprite(self, spr, dx):
+        try:
+            index = self.sprites.index(spr)
+        except ValueError:
+            return
+        place = index + dx
+        if place < 0:
+            place = 0
+        if place > len(self.sprites):
+            place = len(self.sprites)
+        del self.sprites[index]
+        self.sprites.insert(place, spr)
 
     def ks_default(self, ev):
         if ev.type == pygame.KEYDOWN:
@@ -623,45 +855,77 @@ class App:
                 elif ev.mod & key.MOD_ALT:
                     self.sel_offset(-1)
                 elif ev.mod & key.MOD_ACCEL:
-                    if self.selection is not None and self.selection > 0:
-                        self.sprites[self.selection], self.sprites[self.selection - 1] = \
-                            self.sprites[self.selection - 1], self.sprites[self.selection]
-                        self.selection -= 1
+                    if self.selection_has(Sprite):
+                        for spr in self.each_selected(Sprite):
+                            self.bump_sprite(spr, -1)
             elif ev.key == key.RIGHT:
                 if ev.mod == 0:
                     self.canvas.move(dx=0.1 * self.canvas.viewbox.w)
                 elif ev.mod & key.MOD_ALT:
                     self.sel_offset(1)
                 elif ev.mod & key.MOD_ACCEL:
-                    if self.selection is not None and self.selection < len(self.sprites) - 1:
-                        self.sprites[self.selection], self.sprites[self.selection + 1] = \
-                            self.sprites[self.selection + 1], self.sprites[self.selection]
-                        self.selection += 1
+                    if self.selection_has(Sprite):
+                        for spr in self.each_selected(Sprite):
+                            self.bump_sprite(spr, 1)
             elif ev.key == key.G:
                 self.grid_fore = True
             elif ev.key == key.R:
                 self.real_units = not self.real_units
-            elif ev.key == key.Z and self.selection is not None:
-                self.keystate = self.ks_reference
-            elif ev.key == key.T and self.selection is not None:
-                self.origy = self.sprites[self.selection].y
-                self.origmy = self.mpos.y
-                self.keystate = self.ks_move
-                self.undo_state = self.origy
-            elif ev.key == key.S and self.selection is not None:
-                self.origmy = self.mpos.y
-                self.keystate = self.ks_scale
-                self.undo_state = self.sprites[self.selection].scale
-            elif ev.key == key.O and self.selection is not None:
-                if self.selection > 0:
+            elif ev.key == key.K:
+                if self.selection_has(Viewport):
+                    source = list(self.each_selected(Viewport))
+                    plural = 's' if len(source) > 1 else ''
+                    msg = f'Rendered {len(source)} viewport{plural} in {{}}s'
+                else:
+                    source = self.viewports
+                    msg = f'Rendered all viewports in {{}}s'
+                start = time.perf_counter()
+                for vp in source:
+                    vp.render(self)
+                end = time.perf_counter()
+                self.message = msg.format(f'{end - start:.3f}')
+            elif ev.key == key.Z:
+                if self.selection_has(Sprite):
+                    self.keystate = self.ks_reference
+                elif self.selection_is(Viewport):
+                    self.keystate = self.ks_vp_opposite
+                    r = self.primary_selection.rect
+                    self.undo_state = Vec2(r.w, r.h)
+            elif ev.key == key.T:
+                if self.selection_has(Sprite):
+                    self.origmy = self.mpos.y
+                    self.keystate = self.ks_move
+                    self.undo_state = [spr.y for spr in self.each_selected(Sprite)]
+                elif self.selection_is(Viewport):
+                    self.keystate = self.ks_vp_origin
+                    r = self.primary_selection.rect
+                    self.undo_state = Vec2(r.x, r.y)
+            elif ev.key == key.S:
+                if self.selection_has(Sprite):
+                    self.origmy = self.mpos.y
+                    self.keystate = self.ks_scale
+                    self.undo_state = [spr.scale for spr in self.each_selected(Sprite)]
+                elif self.selection_has(Viewport):
+                    self.origmy = self.mpos.y
+                    self.keystate = self.ks_vp_scale
+                    self.undo_state = [vp.scale for vp in self.each_selected(Viewport)]
+            elif ev.key == key.O and self.selection_is(Sprite):
+                idx = self.sprites.index(self.primary_selection)
+                if idx > 0:
+                    self.osprite = self.sprites[idx - 1]
                     self.origmx = self.mpos.x
                     self.keystate = self.ks_offset
-                    self.undo_state = self.sprites[self.selection - 1].olap
+                    self.undo_state = self.osprite.olap
                 else:
                     self.message = "Can't offset the first sprite"
             elif ev.key == key.D and self.selection is not None:
                 self.message = 'Really delete? (y/n)'
                 self.keystate = self.ks_delete
+            elif ev.key == key.V:
+                self.keystate = self.ks_viewport
+                self.origin = None
+                self.work_vp = None
+                self.message = 'Click origin'
         elif ev.type == pygame.KEYUP:
             if ev.key == key.G:
                 self.grid_fore = False
@@ -675,6 +939,11 @@ class App:
                 self.capture = True
                 self.message = f'Write: {self.buffer}{CURSOR}'
                 self.keystate = self.ks_write
+            elif ev.key == key.N and self.primary_selection is not None:
+                self.buffer = ''
+                self.capture = True
+                self.message = f'Name: {CURSOR}'
+                self.keystate = self.ks_object_name
         elif ev.type == pygame.MOUSEBUTTONDOWN:
             if ev.button == mouse.LEFT:
                 self.drag_pos = ev.pos
@@ -690,8 +959,16 @@ class App:
     def ks_dragging(self, ev):
         if ev.type == pygame.MOUSEBUTTONUP:
             if ev.pos == self.drag_pos:
-                ix, _ = self.hit_test(self.canvas.unmap_point(ev.pos))
-                self.selection = ix
+                obj = self.hit_test(self.canvas.unmap_point(ev.pos))
+                if ev.mod & key.MOD_ACCEL and obj is not None:
+                    self.remove_selection(obj)
+                elif ev.mod & key.MOD_SHIFT and obj is not None:
+                    self.add_selection(obj)
+                else:
+                    if obj is None and ev.mod == 0:
+                        self.unselect()
+                    else:
+                        self.set_selection(obj)
             self.keystate = self.ks_default
         elif ev.type == pygame.MOUSEMOTION:
             delta = self.drag_pos - ev.pos
@@ -699,35 +976,38 @@ class App:
             self.canvas.origin = self.drag_origin + delta
 
     def ks_reference(self, ev):
-        spr = self.sprites[self.selection]
         if ev.type == pygame.MOUSEBUTTONDOWN:
             if ev.button == mouse.RIGHT:
-                spr.refy = None
+                for spr in self.each_selected(Sprite):
+                    spr.refy = None
             self.keystate = self.ks_default
         elif ev.type == pygame.MOUSEMOTION:
             p = self.canvas.unmap_point(ev.pos)
-            spr.refy = (p.y - spr.y) / spr.scale
+            for spr in self.each_selected(Sprite):
+                spr.refy = (p.y - spr.y) / spr.scale
         elif ev.type == pygame.KEYDOWN:
             if ev.key == pygame.K_0:
-                spr.y = -spr.refy
-                spr.refy = None
-                self.keystate = self.ks_default
+                for spr in self.each_selected(Sprite):
+                    spr.y = -spr.refy
+                    spr.refy = None
+                    self.keystate = self.ks_default
 
     def ks_move(self, ev):
-        spr = self.sprites[self.selection]
         if ev.type == pygame.MOUSEBUTTONDOWN:
             if ev.button == mouse.RIGHT:
-                spr.y = self.undo_state
+                for spr, oy in zip(self.each_selected(Sprite), self.undo_state):
+                    spr.y = oy
             self.keystate = self.ks_default
         elif ev.type == pygame.MOUSEMOTION:
             d = self.canvas.unmap_scaled(Vec2(0, ev.pos.y - self.origmy))
-            spr.y = self.origy + d.y
+            for spr, oy in zip(self.each_selected(Sprite), self.undo_state):
+                spr.y = oy + d.y
 
     def ks_scale(self, ev):
-        spr = self.sprites[self.selection]
         if ev.type == pygame.MOUSEBUTTONDOWN:
             if ev.button == mouse.RIGHT:
-                spr.scale = self.undo_state
+                for spr, sc in zip(self.each_selected(Sprite), self.undo_state):
+                    spr.scale = sc
             self.keystate = self.ks_default
         elif ev.type == pygame.MOUSEMOTION:
             d = ev.pos.y - self.origmy
@@ -737,11 +1017,50 @@ class App:
                 base = 1.001
             elif self.mods & key.MOD_SHIFT:
                 base = 1.1
-            spr.scale *= base**d
+            for spr in self.each_selected(Sprite):
+                spr.scale *= base**d
             #print(f'new scale: {spr.scale}')
 
+    def ks_vp_opposite(self, ev):
+        vp = self.primary_selection
+        if ev.type == pygame.MOUSEBUTTONDOWN:
+            if ev.button == mouse.RIGHT:
+                vp.rect.w, vp.rect.x = self.undo_state
+            self.keystate = self.ks_default
+        elif ev.type == pygame.MOUSEMOTION:
+            cpt = self.canvas.unmap_point(ev.pos)
+            vp.rect.w = cpt.x - vp.rect.x
+            vp.rect.h = cpt.y - vp.rect.y
+
+    def ks_vp_origin(self, ev):
+        vp = self.primary_selection
+        if ev.type == pygame.MOUSEBUTTONDOWN:
+            if ev.button == mouse.RIGHT:
+                vp.rect.x, vp.rect.y = self.undo_state
+            self.keystate = self.ks_default
+        elif ev.type == pygame.MOUSEMOTION:
+            cpt = self.canvas.unmap_point(ev.pos)
+            vp.rect.x, vp.rect.y = cpt.x, cpt.y
+
+    def ks_vp_scale(self, ev):
+        if ev.type == pygame.MOUSEBUTTONDOWN:
+            if ev.button == mouse.RIGHT:
+                for vp, sc in zip(self.each_selected(Viewport), self.undo_state):
+                    vp.scale = sc
+            self.keystate = self.ks_default
+        elif ev.type == pygame.MOUSEMOTION:
+            d = ev.pos.y - self.origmy
+            self.origmy = ev.pos.y
+            base = 1.01
+            if self.mods & key.MOD_ACCEL:
+                base = 1.001
+            elif self.mods & key.MOD_SHIFT:
+                base = 1.1
+            for vp in self.each_selected(Viewport):
+                vp.scale *= base**d
+
     def ks_offset(self, ev):
-        spr = self.sprites[self.selection - 1]
+        spr = self.osprite
         if ev.type == pygame.MOUSEBUTTONDOWN:
             if ev.button == mouse.RIGHT:
                 spr.olap = self.undo_state
@@ -763,10 +1082,17 @@ class App:
                     traceback.print_exc()
                     self.message = repr(e)
                 else:
-                    if self.selection is not None:
-                        self.sprites.insert(self.selection, spr)
+                    if self.selection_is(Sprite):
+                        try:
+                            self.sprites.insert(
+                                self.sprites.index(self.primary_selection),
+                                spr,
+                            )
+                        except ValueError:
+                            self.sprites.append(spr)
                     else:
                         self.sprites.append(spr)
+                    self.set_selection(spr)
                 self.keystate = self.ks_default
                 self.message = ''
                 self.capture = False
@@ -777,15 +1103,16 @@ class App:
                     pfx = os.path.commonprefix(opts)
                     if len(pfx) > len(self.buffer):
                         self.buffer = pfx
-            else:
-                self.add_to_buffer(ev)
-            self.message = f'Load: {self.buffer}{CURSOR}'
+        self.message = f'Load: {self.buffer}{CURSOR}'
 
     def ks_delete(self, ev):
         if ev.type == pygame.KEYDOWN:
             if ev.key == key.Y:
-                del self.sprites[self.selection]
-                self.selection = None
+                if self.selection_is(Sprite):
+                    self.sprites.remove(self.primary_selection)
+                elif self.selection_is(Viewport):
+                    self.viewports.remove(self.primary_selection)
+                self.unselect()
             self.keystate = self.ks_default
             self.message = ''
 
@@ -804,9 +1131,42 @@ class App:
                     pfx = os.path.commonprefix(opts)
                     if len(pfx) > len(self.buffer):
                         self.buffer = pfx
-            else:
-                self.add_to_buffer(ev)
-            self.message = f'Write: {self.buffer}{CURSOR}'
+        self.message = f'Write: {self.buffer}{CURSOR}'
+
+    def ks_viewport(self, ev):
+        if ev.type == pygame.MOUSEMOTION:
+            cpt = self.canvas.unmap_point(ev.pos)
+            if self.origin is not None:
+                r = self.work_vp.rect
+                r.w, r.h = cpt.x - r.x, cpt.y - r.y
+        elif ev.type == pygame.MOUSEBUTTONDOWN:
+            if ev.button == mouse.RIGHT:
+                if self.work_vp is not None:
+                    self.viewports.remove(self.work_vp)
+                self.keystate = self.ks_default
+            elif ev.button == mouse.LEFT:
+                cpt = self.canvas.unmap_point(ev.pos)
+                if self.origin is None:
+                    self.origin = cpt
+                    self.work_vp = Viewport('unnamed', Rect(cpt.x, cpt.y, 1, 1))
+                    self.viewports.append(self.work_vp)
+                    self.message = 'Click opposite'
+                else:
+                    self.capture = True
+                    self.set_selection(self.work_vp)
+                    self.keystate = self.ks_object_name
+                    self.buffer = ''
+                    self.message = f'Name: {CURSOR}'
+
+    def ks_object_name(self, ev):
+        if ev.type == pygame.KEYDOWN:
+            if ev.key == key.ENTER:
+                self.primary_selection.name = self.buffer
+                self.keystate = self.ks_default
+                self.capture = False
+                self.message = ''
+                return
+        self.message = f'Name: {self.buffer}{CURSOR}'
 
 def main():
     import sys
