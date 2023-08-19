@@ -24,6 +24,14 @@ NS = {
 def ns(n, t):
     return f'{{{NS[n]}}}{t}'
 
+SCALE = ' kMG'
+def si(n):
+    unit = 0
+    while n >= 4096 and unit < len(SCALE) - 1:
+        n /= 1024
+        unit += 1
+    return f'{n:.3f}{SCALE[unit].strip()}'
+
 CURSOR = '|'
 
 def steps(origin, width, bias = 0.25):
@@ -386,6 +394,12 @@ class Viewport:
             Vec2(r.x, hy),
             col,
             anchor_x='right',
+        )
+        prod = s.x*s.y
+        canv.draw_text(
+            f'{si(prod)}px, ~{si(prod*4)}B',
+            Vec2(r.x + r.w, r.y + r.h),
+            col,
         )
 
     def render(self, app):
