@@ -15,6 +15,18 @@ from pyglet.window import key, mouse
 from pygame import Rect
 import pygame
 
+CLIP_FILE = '/tmp/clip.xml'
+def clip_copy(s):
+    with open(CLIP_FILE, 'w') as f:
+        f.write(s)
+
+def clip_paste():
+    try:
+        with open(CLIP_FILE) as f:
+            return f.read()
+    except IOError:
+        return ''
+
 NS = {
     'svg': 'http://www.w3.org/2000/svg',
     'xlink': 'http://www.w3.org/1999/xlink',
@@ -201,16 +213,58 @@ class Canvas:
         ).draw()
 
 class Sprite:
-    def __init__(self, img, path, scale=1.0, olap = 0.75, y = 0.0, refy = None, name = 'unnamed'):
+    def __init__(self, img, path, scale=1.0, olap = 0.75, y = 0.0, refy = None, name = 'unnamed', asset = None):
         self.img, self.path, self.scale, self.olap, self.y = img, path, scale, olap, y
         self.sprite = pyglet.sprite.Sprite(img=self.img)
         self.refy = refy
         self.name = name
+        self.asset = asset
         self.lastx = None
+
+    def __repr__(self):
+        return f'<Sprite {self.name} {self.path!r} x{self.scale} +{self.y} R{self.refy} A{self.asset!r}'
+
+    @classmethod
+    def from_asset(cls, asset_path):
+        asset = ET.ElementTree(file=asset_path).getroot()
+        path = asset.get(ns('sizechart', 'path'))
+        scale = float(asset.get(ns('sizechart', 'scale'), 1.0))
+        y = float(asset.get(ns('sizechart', 'offsetY'), 0.0))
+        ry = asset.get(ns('sizechart', 'referenceY'))
+        if ry is not None:
+            ry = float(ry)
+        name = asset.get(ns('sizechart', 'name'), 'unnamed')
+        return cls(pyglet.image.load(path), path, scale,
+                y=y, refy=ry, name=name, asset=asset_path,
+        )
 
     @classmethod
     def from_element(cls, elem):
-        path = elem.get('href', elem.get(ns('xlink', 'href')))
+        path = None
+        scale = None
+        y = None
+        ry = None
+        name = None
+        asset = elem.get(ns('sizechart', 'asset'))
+        print(f'spr asset {asset}')
+        if asset:
+            try:
+                et = ET.ElementTree(file=asset)
+            except FileNotFoundError:
+                pass
+            else:
+                root = et.getroot()
+                path, scale, y, ry, name = \
+                    root.get(ns('sizechart', 'path')), \
+                    float(root.get(ns('sizechart', 'scale'), 1.0)), \
+                    float(root.get(ns('sizechart', 'offsetY'), 0.0)), \
+                    root.get(ns('sizechart', 'referenceY')), \
+                    root.get(ns('sizechart', 'name'), 'unnamed')
+                if ry is not None:
+                    ry = float(ry)
+                print(f'asset results: {path},{scale},{y},{ry},{name}')
+        if path is None:
+            path = elem.get('href', elem.get(ns('xlink', 'href')))
         try:
             surf = pyglet.image.load(path)
         except FileNotFoundError:
@@ -222,14 +276,19 @@ class Sprite:
                     (0, 0, 0, 255),
                 ),
             )
-        scale = float(elem.get(ns('sizechart', 'scale'), 1.0))
+        if scale is None:
+            scale = float(elem.get(ns('sizechart', 'scale'), 1.0))
         olap = float(elem.get(ns('sizechart', 'overlap'), 0.75))
-        y = float(elem.get(ns('sizechart', 'offsetY'), 0.0))
-        ry = elem.get(ns('sizechart', 'referenceY'))
-        if ry is not None:
-            ry = float(ry)
-        name = elem.get(ns('sizechart', 'name'), 'unnamed')
-        return cls(surf, path, scale, olap, y, ry, name)
+        if y is None:
+            y = float(elem.get(ns('sizechart', 'offsetY'), 0.0))
+        if ry is None:
+            ry = elem.get(ns('sizechart', 'referenceY'))
+            if ry is not None:
+                ry = float(ry)
+        if name is None:
+            name = elem.get(ns('sizechart', 'name'), 'unnamed')
+        print(f'sprite {path},{scale},{olap},{y},{ry},{name}')
+        return cls(surf, path, scale, olap, y, ry, name, asset)
 
     REF_COLOR = (255, 0, 255)
     def draw(self, canv, x, app):
@@ -278,10 +337,14 @@ class Sprite:
         print(f'spr rect {r}')
         return r
 
-    def contains(self, cpt):
+    def contains(self, canv, spt, cpt):
         return self.rect.collidepoint(cpt)
 
     def save(self, tb, vh):
+        if self.asset is not None:
+            asset = self.make_asset()
+            with open(self.asset, 'w') as f:
+                f.write(ET.tostring(asset, 'unicode'))
         attrs = {
                 'href': self.path,
                 'x': str(self.lastx),
@@ -298,8 +361,21 @@ class Sprite:
         }
         if self.refy is not None:
             attrs[ns('sizechart', 'referenceY')] = str(self.refy)
+        if self.asset is not None:
+            attrs[ns('sizechart', 'asset')] = self.asset
         tb.start(ns('svg', 'image'), attrs)
         tb.end(ns('svg', 'image'))
+
+    def make_asset(self):
+        attrs = {
+                ns('sizechart', 'path'): self.path,
+                ns('sizechart', 'scale'): str(self.scale),
+                ns('sizechart', 'offsetY'): str(self.y),
+                ns('sizechart', 'name'): self.name,
+        }
+        if self.refy is not None:
+            attrs[ns('sizechart', 'referenceY')] = str(self.refy)
+        return ET.Element(ns('sizechart', 'asset'), attrs)
 
 class Viewport:
     FBO = None
@@ -340,14 +416,15 @@ class Viewport:
         )
 
     SLACK = 5
-    def contains(self, cpt):
-        ox, oy = self.rect.x, self.rect.y
-        fx, fy = ox + self.rect.w, oy + self.rect.h
-        if (abs(cpt.x - ox) < self.SLACK or abs(cpt.x - fx) < self.SLACK) \
-                and oy <= cpt.y <= fy:
+    def contains(self, canv, spt, cpt):
+        o = Vec2(self.rect.x, self.rect.y)
+        f = o + Vec2(self.rect.w, self.rect.h)
+        mo, mf = map(canv.map_point, (o, f))
+        if (abs(spt.x - mo.x) < self.SLACK or abs(spt.x - mf.x) < self.SLACK) \
+                and mo.y <= spt.y <= mf.y:
             return True
-        if (abs(cpt.y - oy) < self.SLACK or abs(cpt.y - fy) < self.SLACK) \
-                and ox <= cpt.y <= fx:
+        if (abs(spt.y - mo.y) < self.SLACK or abs(spt.y - mf.y) < self.SLACK) \
+                and mo.x <= spt.x <= mf.x:
             return True
         return False
 
@@ -441,7 +518,7 @@ class Event:
             setattr(self, k, v)
 
 class App:
-    def __init__(self, screen):
+    def __init__(self, screen, default_file='chart.svg'):
         self.canvas = Canvas(screen)
         self.sprites = []
         self.viewports = []
@@ -455,6 +532,7 @@ class App:
         self.capture = False
         self.buffer = ''
         self.message = ''
+        self.default_file = default_file
         self.mpos = Vec2()
         self.mods = 0
         screen.push_handlers(
@@ -545,6 +623,32 @@ class App:
                 self.sprites.append(Sprite.from_element(child))
             elif role == 'Viewport':
                 self.viewports.append(Viewport.from_element(child))
+        print('Post-load:', self.sprites)
+
+    def export(self, elements):
+        tb = ET.TreeBuilder()
+        tb.start(ns('sizechart', 'clip'), {})
+        for elem in elements:
+            if isinstance(elem, Sprite):
+                elem.save(tb, 0)
+            elif isinstance(elem, Viewport):
+                elem.save(tb)
+            else:
+                raise TypeError(type(elem))
+        tb.end(ns('sizechart', 'clip'))
+        return ET.ElementTree(tb.close())
+
+    def import_(self, root):
+        valid = 0
+        for child in root:
+            role = child.get(ns('sizechart', 'role'))
+            if role == 'Sprite':
+                self.sprites.append(Sprite.from_element(child))
+                valid += 1
+            elif role == 'Viewport':
+                self.viewports.append(Viewport.from_element(child))
+                valid += 1
+        return valid
 
     SEL_PRIM_COLOR = (255, 128, 0)
     SEL_COLOR = (128, 64, 0)
@@ -607,13 +711,13 @@ class App:
                 color = col,
             )
 
-    def hit_test(self, cpt):
+    def hit_test(self, spt, cpt):
         print(f'hit {cpt}')
         for vp in self.viewports:
-            if vp.contains(cpt):
+            if vp.contains(self.canvas, spt, cpt):
                 return vp
-        for spr in self.sprites:
-            if spr.contains(cpt):
+        for spr in reversed(self.sprites):
+            if spr.contains(self.canvas, spt, cpt):
                 return spr
         return None
 
@@ -637,9 +741,15 @@ class App:
     def set_selection(self, obj):
         self.selection = [obj]
 
+    def set_primary_selection(self, obj):
+        if not self.selection:
+            self.set_selection(obj)
+        else:
+            self.selection[0] = obj
+
     def add_selection(self, obj):
         self.remove_selection(obj)
-        self.selection.insert(obj, 0)
+        self.selection.insert(0, obj)
 
     def remove_selection(self, obj):
         while obj in self.selection:
@@ -831,7 +941,7 @@ class App:
         place = index + ds
         if place < 0 or place >= len(self.sprites):
             return
-        self.set_selection(self.sprites[place])
+        self.set_primary_selection(self.sprites[place])
 
     def add_to_buffer(self, ev):
         pass
@@ -940,6 +1050,36 @@ class App:
                 self.origin = None
                 self.work_vp = None
                 self.message = 'Click origin'
+            elif ev.key == key.Y:
+                save = self.export(self.selection)
+                clip_copy(ET.tostring(save.getroot(), 'unicode'))
+                self.message = f'Exported {len(self.selection)} objects'
+            elif ev.key == key.P:
+                clip = clip_paste()
+                if not clip:
+                    self.message = 'No clipboard data'
+                else:
+                    root = ET.fromstring(clip)
+                    res = self.import_(root)
+                    self.message = f'Imported {res} objects'
+            elif ev.key == key.A:
+                if ev.mod & key.MOD_SHIFT:
+                    fnames = []
+                    for spr in self.each_selected(Sprite):
+                        fname = os.path.join(
+                            os.path.dirname(spr.path),
+                            f'{spr.name}.asset',
+                        )
+                        fnames.append(fname)
+                        with open(fname, 'w') as f:
+                            f.write(ET.tostring(spr.make_asset(), 'unicode'))
+                        spr.asset = fname
+                    self.message = f'Saved asset(s) {", ".join(fnames)}'
+                elif ev.mod & key.MOD_ACCEL:
+                    if ev.mod & key.MOD_SHIFT:
+                        self.unselect()
+                    else:
+                        self.selection = self.sprites[:]
         elif ev.type == pygame.KEYUP:
             if ev.key == key.G:
                 self.grid_fore = False
@@ -949,7 +1089,7 @@ class App:
                 self.message = f'Load: {CURSOR}'
                 self.keystate = self.ks_load
             elif ev.key == key.W:
-                self.buffer = 'chart.svg'
+                self.buffer = self.default_file
                 self.capture = True
                 self.message = f'Write: {self.buffer}{CURSOR}'
                 self.keystate = self.ks_write
@@ -973,7 +1113,7 @@ class App:
     def ks_dragging(self, ev):
         if ev.type == pygame.MOUSEBUTTONUP:
             if ev.pos == self.drag_pos:
-                obj = self.hit_test(self.canvas.unmap_point(ev.pos))
+                obj = self.hit_test(ev.pos, self.canvas.unmap_point(ev.pos))
                 if ev.mod & key.MOD_ACCEL and obj is not None:
                     self.remove_selection(obj)
                 elif ev.mod & key.MOD_SHIFT and obj is not None:
@@ -1088,25 +1228,28 @@ class App:
         if ev.type == pygame.KEYDOWN:
             if ev.key == key.ENTER:
                 try:
-                    spr = Sprite(
-                        pyglet.image.load(self.buffer),
-                        self.buffer,
-                    )
-                except FileNotFoundError as e:
-                    traceback.print_exc()
-                    self.message = repr(e)
-                else:
-                    if self.selection_is(Sprite):
-                        try:
-                            self.sprites.insert(
-                                self.sprites.index(self.primary_selection),
-                                spr,
-                            )
-                        except ValueError:
-                            self.sprites.append(spr)
-                    else:
+                    spr = Sprite.from_asset(self.buffer)
+                except (FileNotFoundError, ET.ParseError):
+                    try:
+                        spr = Sprite(
+                            pyglet.image.load(self.buffer),
+                            self.buffer,
+                        )
+                    except FileNotFoundError as e:
+                        traceback.print_exc()
+                        self.message = repr(e)
+                        return
+                if self.selection_is(Sprite):
+                    try:
+                        self.sprites.insert(
+                            self.sprites.index(self.primary_selection),
+                            spr,
+                        )
+                    except ValueError:
                         self.sprites.append(spr)
-                    self.set_selection(spr)
+                else:
+                    self.sprites.append(spr)
+                self.set_selection(spr)
                 self.keystate = self.ks_default
                 self.message = ''
                 self.capture = False
@@ -1190,6 +1333,7 @@ def main():
     if len(sys.argv) > 1:
         et = ET.ElementTree(file=sys.argv[1])
         app.load_tree(et.getroot())
+        app.default_file = sys.argv[1]
     clock = pygame.time.Clock()
     # begin test code
     #path = "images/Grissess_Full_transparent.png"
