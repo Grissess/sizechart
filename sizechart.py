@@ -1,4 +1,5 @@
 from xml.etree import ElementTree as ET
+import array
 import argparse
 import math
 import glob
@@ -71,6 +72,27 @@ def mod_for(k):
     elif k in {key.LWINDOWS, key.RWINDOWS}:
         return key.MOD_WINDOWS
     return 0
+
+def mean(seq, lim=1024):
+    def inner(s):
+        runtot = 0
+        count = 0
+        for elem in s:
+            runtot += elem
+            count += 1
+            if count >= lim:
+                yield (runtot, count)
+                runtot = 0
+                count = 0
+        yield (runtot, count)
+
+    subsum = tuple(inner(seq))
+    depth = 1
+    while len(subsum) > 1:
+        subsum = tuple(inner(a / b for a, b in subsum))
+        depth += 1
+
+    return subsum[0][0] / subsum[0][1], depth
 
 class RenderState(Enum):
     NORMAL = auto()
@@ -213,8 +235,11 @@ class Canvas:
         ).draw()
 
 class Sprite:
-    def __init__(self, img, path, scale=1.0, olap = 0.75, y = 0.0, refy = None, name = 'unnamed', asset = None):
+    def __init__(self, img, path, scale=1.0, olap = 0.75, y = 0.0, refy = None, name = 'unnamed', asset = None, avg_color = None):
         self.img, self.path, self.scale, self.olap, self.y = img, path, scale, olap, y
+        if avg_color is None:
+            avg_color = self.average_color(self.img)
+        self.avg_col = avg_color
         self.sprite = pyglet.sprite.Sprite(img=self.img)
         self.refy = refy
         self.name = name
@@ -233,9 +258,13 @@ class Sprite:
         ry = asset.get(ns('sizechart', 'referenceY'))
         if ry is not None:
             ry = float(ry)
+        ac = asset.get(ns('sizechart', 'averageColor'))
+        if ac is not None:
+            ac = tuple(int(i.strip()) for i in ac.split(','))
         name = asset.get(ns('sizechart', 'name'), 'unnamed')
         return cls(pyglet.image.load(path), path, scale,
                 y=y, refy=ry, name=name, asset=asset_path,
+                avg_color=ac,
         )
 
     @classmethod
@@ -244,6 +273,7 @@ class Sprite:
         scale = None
         y = None
         ry = None
+        ac = None
         name = None
         asset = elem.get(ns('sizechart', 'asset'))
         print(f'spr asset {asset}')
@@ -254,12 +284,13 @@ class Sprite:
                 pass
             else:
                 root = et.getroot()
-                path, scale, y, ry, name = \
+                path, scale, y, ry, name, ac = \
                     root.get(ns('sizechart', 'path')), \
                     float(root.get(ns('sizechart', 'scale'), 1.0)), \
                     float(root.get(ns('sizechart', 'offsetY'), 0.0)), \
                     root.get(ns('sizechart', 'referenceY')), \
-                    root.get(ns('sizechart', 'name'), 'unnamed')
+                    root.get(ns('sizechart', 'name'), 'unnamed'), \
+                    root.get(ns('sizechart', 'averageColor'))
                 if ry is not None:
                     ry = float(ry)
                 print(f'asset results: {path},{scale},{y},{ry},{name}')
@@ -287,8 +318,33 @@ class Sprite:
                 ry = float(ry)
         if name is None:
             name = elem.get(ns('sizechart', 'name'), 'unnamed')
+        if ac is None:
+            ac = elem.get(ns('sizechart', 'averageColor'))
+        if ac is not None:
+            ac = tuple(int(i.strip()) for i in ac.split(','))
         print(f'sprite {path},{scale},{olap},{y},{ry},{name}')
-        return cls(surf, path, scale, olap, y, ry, name, asset)
+        return cls(surf, path, scale, olap, y, ry, name, asset, ac)
+
+    @staticmethod
+    def average_color(img, ign_transp=True):
+        idata = img.get_image_data()
+        buffer = idata.get_data('RGBA', idata.width * 4)
+        pixels = array.array('I', buffer)
+        cavg = []
+        if ign_transp:
+            keep = lambda p: p & 0xff000000 > 0
+        else:
+            keep = lambda p: True
+        for cmp in range(4):
+            shift = 8 * cmp
+            mask = 0xff << shift
+            m, d = mean((i & mask) >> shift for i in pixels if keep(i))
+            print(f'avg {len(pixels)} px in depth {d}')
+            cavg.append(m)
+
+        print(f'averages: {cavg}')
+
+        return tuple(int(i) for i in cavg[:3])
 
     REF_COLOR = (255, 0, 255)
     def draw(self, canv, x, app):
@@ -317,6 +373,14 @@ class Sprite:
                 Vec2(x, y),
                 color = self.REF_COLOR,
             )
+
+        canv.draw_text(
+            self.name,
+            Vec2(x + self.sprite.width / 2, app.min_y),
+            color = self.avg_col,
+            anchor_x = 'center',
+        )
+
         return x + self.sprite.width * self.olap
 
     def box(self, canv, x, color=(255, 255, 255)):
@@ -356,6 +420,7 @@ class Sprite:
                 ns('sizechart', 'scale'): str(self.scale),
                 ns('sizechart', 'overlap'): str(self.olap),
                 ns('sizechart', 'offsetY'): str(self.y),
+                ns('sizechart', 'averageColor'): ','.join(str(i) for i in self.avg_col),
                 ns('sizechart', 'name'): self.name,
                 ns('sizechart', 'role'): 'Sprite',
         }
@@ -371,6 +436,7 @@ class Sprite:
                 ns('sizechart', 'path'): self.path,
                 ns('sizechart', 'scale'): str(self.scale),
                 ns('sizechart', 'offsetY'): str(self.y),
+                ns('sizechart', 'averageColor'): ','.join(str(i) for i in self.avg_col),
                 ns('sizechart', 'name'): self.name,
         }
         if self.refy is not None:
@@ -657,6 +723,7 @@ class App:
         if not self.grid_fore:
             self.render_grid()
         x = 0.0
+        self.min_y = min((spr.y * spr.scale for spr in self.sprites), default=0)
         for i, spr in enumerate(self.sprites):
             nx = spr.draw(self.canvas, x, self)
             if spr in self.selection:
