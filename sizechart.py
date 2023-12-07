@@ -1032,7 +1032,7 @@ class App:
                 if ev.mod & key.MOD_ACCEL:
                     self.canvas.scale *= 2.0
                 elif ev.mod & key.MOD_ALT:
-                    self.selection = None
+                    self.selection = []
                 elif ev.mod == 0:
                     self.canvas.move(dy=0.1 * self.canvas.viewbox.h)
             elif ev.key == key.DOWN:
