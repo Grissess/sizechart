@@ -235,7 +235,7 @@ class Canvas:
         ).draw()
 
 class Sprite:
-    def __init__(self, img, path, scale=1.0, olap = 0.75, y = 0.0, refy = None, name = 'unnamed', asset = None, avg_color = None):
+    def __init__(self, img, path, scale=1.0, olap = 0.75, y = 0.0, refy = None, name = 'unnamed', asset = None, avg_color = None, mag_filter=None, min_filter=None):
         self.img, self.path, self.scale, self.olap, self.y = img, path, scale, olap, y
         if avg_color is None:
             avg_color = self.average_color(self.img)
@@ -245,9 +245,11 @@ class Sprite:
         self.name = name
         self.asset = asset
         self.lastx = None
+        self._mag_filter, self._min_filter = mag_filter, min_filter
+        self.reset_filters()
 
     def __repr__(self):
-        return f'<Sprite {self.name} {self.path!r} x{self.scale} +{self.y} R{self.refy} A{self.asset!r}'
+        return f'<Sprite {self.name} {self.path!r} x{self.scale} +{self.y} N{self._min_filter} G{self._mag_filter} R{self.refy} A{self.asset!r}>'
 
     @classmethod
     def from_asset(cls, asset_path):
@@ -258,13 +260,15 @@ class Sprite:
         ry = asset.get(ns('sizechart', 'referenceY'))
         if ry is not None:
             ry = float(ry)
+        nf = asset.get(ns('sizechart', 'minFilter'))
+        gf = asset.get(ns('sizechart', 'magFilter'))
         ac = asset.get(ns('sizechart', 'averageColor'))
         if ac is not None:
             ac = tuple(int(i.strip()) for i in ac.split(','))
         name = asset.get(ns('sizechart', 'name'), 'unnamed')
         return cls(pyglet.image.load(path), path, scale,
                 y=y, refy=ry, name=name, asset=asset_path,
-                avg_color=ac,
+                avg_color=ac, min_filter=nf, mag_filter=gf,
         )
 
     @classmethod
@@ -274,6 +278,7 @@ class Sprite:
         y = None
         ry = None
         ac = None
+        nf, gf = None, None
         name = None
         asset = elem.get(ns('sizechart', 'asset'))
         print(f'spr asset {asset}')
@@ -284,16 +289,18 @@ class Sprite:
                 pass
             else:
                 root = et.getroot()
-                path, scale, y, ry, name, ac = \
+                path, scale, y, ry, name, ac, nf, gf = \
                     root.get(ns('sizechart', 'path')), \
                     float(root.get(ns('sizechart', 'scale'), 1.0)), \
                     float(root.get(ns('sizechart', 'offsetY'), 0.0)), \
                     root.get(ns('sizechart', 'referenceY')), \
                     root.get(ns('sizechart', 'name'), 'unnamed'), \
-                    root.get(ns('sizechart', 'averageColor'))
+                    root.get(ns('sizechart', 'averageColor')), \
+                    root.get(ns('sizechart', 'minFilter')), \
+                    root.get(ns('sizechart', 'magFilter')),
                 if ry is not None:
                     ry = float(ry)
-                print(f'asset results: {path},{scale},{y},{ry},{name}')
+                print(f'asset results: {path},{scale},{y},{ry},{nf},{gf},{name}')
         if path is None:
             path = elem.get('href', elem.get(ns('xlink', 'href')))
         try:
@@ -316,6 +323,10 @@ class Sprite:
             ry = elem.get(ns('sizechart', 'referenceY'))
             if ry is not None:
                 ry = float(ry)
+        if nf is None:
+            nf = elem.get(ns('sizechart', 'minFilter'))
+        if gf is None:
+            gf = elem.get(ns('sizechart', 'magFilter'))
         if name is None:
             name = elem.get(ns('sizechart', 'name'), 'unnamed')
         if ac is None:
@@ -323,7 +334,7 @@ class Sprite:
         if ac is not None:
             ac = tuple(int(i.strip()) for i in ac.split(','))
         print(f'sprite {path},{scale},{olap},{y},{ry},{name}')
-        return cls(surf, path, scale, olap, y, ry, name, asset, ac)
+        return cls(surf, path, scale, olap, y, ry, name, asset, ac, gf, nf)
 
     @staticmethod
     def average_color(img, ign_transp=True):
@@ -426,6 +437,10 @@ class Sprite:
         }
         if self.refy is not None:
             attrs[ns('sizechart', 'referenceY')] = str(self.refy)
+        if self._min_filter is not None:
+            attrs[ns('sizechart', 'minFilter')] = self._min_filter
+        if self._mag_filter is not None:
+            attrs[ns('sizechart', 'magFilter')] = self._mag_filter
         if self.asset is not None:
             attrs[ns('sizechart', 'asset')] = self.asset
         tb.start(ns('svg', 'image'), attrs)
@@ -441,7 +456,40 @@ class Sprite:
         }
         if self.refy is not None:
             attrs[ns('sizechart', 'referenceY')] = str(self.refy)
+        if self._min_filter is not None:
+            attrs[ns('sizechart', 'minFilter')] = self._min_filter
+        if self._mag_filter is not None:
+            attrs[ns('sizechart', 'magFilter')] = self._mag_filter
         return ET.Element(ns('sizechart', 'asset'), attrs)
+
+    @property
+    def mag_filter(self): return self._mag_filter
+    @property
+    def min_filter(self): return self._min_filter
+    @mag_filter.setter
+    def mag_filter(self, value):
+        self._mag_filter = value
+        self.reset_filters()
+    @min_filter.setter
+    def min_filter(self, value):
+        self._min_filter = value
+        self.reset_filters()
+
+    def reset_filters(self):
+        if self._min_filter is None and self._mag_filter is None:
+            return
+        tex = self.img.get_texture()
+        if isinstance(tex, pyglet.image.TextureRegion):
+            print(f'WARN: {tex} owned by {tex.owner}--this filter change may affect other sprits')
+            tex = tex.owner
+        glBindTexture(GL_TEXTURE_2D, tex.id)
+        if self._min_filter is not None:
+            nf = getattr(pyglet.gl, self._min_filter)
+            glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, nf)
+        if self._mag_filter is not None:
+            gf = getattr(pyglet.gl, self._mag_filter)
+            glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, gf)
+        glBindTexture(GL_TEXTURE_2D, 0)
 
 class Viewport:
     FBO = None
@@ -898,6 +946,8 @@ class App:
                 f'Overlap: {spr.olap:.3f}',
                 f'Pixel Size: {sw:.3f},{sh:.3f}',
                 f'Ref: {ref}',
+                f'Filter Min: {spr.min_filter}',
+                f'Filter Mag: {spr.mag_filter}',
             ])
         elif self.selection_is(Viewport):
             vp = self.primary_selection
@@ -1147,6 +1197,13 @@ class App:
                         self.unselect()
                     else:
                         self.selection = self.sprites[:]
+            elif ev.key == key.F:
+                if self.selection_has(Sprite):
+                    self.filter_which = [True, True]
+                    self.keystate = self.ks_filter
+                    self.message = 'Filter(both)'
+                else:
+                    self.message = 'Nothing to filter'
         elif ev.type == pygame.KEYUP:
             if ev.key == key.G:
                 self.grid_fore = False
@@ -1391,6 +1448,54 @@ class App:
                 self.message = ''
                 return
         self.message = f'Name: {self.buffer}{CURSOR}'
+
+    def ks_filter(self, ev):
+        if ev.type == pygame.KEYDOWN:
+            mode = ''
+            if ev.key == key.ENTER:
+                self.keystate = self.ks_default
+                self.message = ''
+                return
+            elif ev.key == key.N:
+                self.filter_which[0] = not self.filter_which[0]
+            elif ev.key == key.G:
+                self.filter_which[1] = not self.filter_which[1]
+            elif ev.key == key.D:
+                mode = 'default (LINEAR)'
+                nf, gf = self.filter_which
+                for spr in self.each_selected(Sprite):
+                    if nf:
+                        spr.min_filter = None
+                    if gf:
+                        spr.mag_filter = None
+            elif ev.key == key.L:
+                mode = 'LINEAR'
+                nf, gf = self.filter_which
+                for spr in self.each_selected(Sprite):
+                    if nf:
+                        spr.min_filter = 'GL_LINEAR'
+                    if gf:
+                        spr.mag_filter = 'GL_LINEAR'
+            elif ev.key == key.E:
+                mode = 'NEAREST'
+                nf, gf = self.filter_which
+                for spr in self.each_selected(Sprite):
+                    if nf:
+                        spr.min_filter = 'GL_NEAREST'
+                    if gf:
+                        spr.mag_filter = 'GL_NEAREST'
+            nf, gf = self.filter_which
+            which = 'neither'
+            if nf and gf:
+                which = 'both'
+            elif nf:
+                which = 'min'
+            elif gf:
+                which = 'mag'
+            mstr = ''
+            if mode:
+                mstr = f': {mode}'
+            self.message = f'Filter({which}){mstr}'
 
 def main():
     import sys
