@@ -940,6 +940,7 @@ class App:
             lines.extend([
                 f'Path: {spr.path}',
                 f'Name: {spr.name}',
+                f'Asset: {spr.asset!r}',
                 f'Scale: {spr.scale:.3f}',
                 f'Y-offset: {spr.y:.3f}',
                 f'Rendered X: {spr.lastx:.3f}',
@@ -959,6 +960,10 @@ class App:
                 f'Render Size: {rs.x} x {rs.y} px',
                 f'Scale: {vp.scale}',
             ])
+        if len(self.selection) > 1:
+            sprites = list(self.each_selected(Sprite))
+            viewports = list(self.each_selected(Viewport))
+            lines.append(f'All Selected: {len(sprites)} Sprites, {len(viewports)} Viewports')
 
         cw = self.canvas.view_size.x
         #mw = max(i.get_width() for i in surfs)
@@ -1143,7 +1148,7 @@ class App:
                     self.undo_state = Vec2(r.x, r.y)
             elif ev.key == key.S:
                 if self.selection_has(Sprite):
-                    self.origmy = self.mpos.y
+                    self.origmx, self.origmy = self.mpos
                     self.keystate = self.ks_scale
                     self.undo_state = [spr.scale for spr in self.each_selected(Sprite)]
                 elif self.selection_has(Viewport):
@@ -1288,8 +1293,8 @@ class App:
                     spr.scale = sc
             self.keystate = self.ks_default
         elif ev.type == pygame.MOUSEMOTION:
-            d = ev.pos.y - self.origmy
-            self.origmy = ev.pos.y
+            d = ev.pos.y - self.origmy + 0.01 * (ev.pos.x - self.origmx)
+            self.origmx, self.origmy = ev.pos
             base = 1.01
             if self.mods & key.MOD_ACCEL:
                 base = 1.001
