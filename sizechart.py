@@ -772,6 +772,8 @@ class App:
             self.render_grid()
         x = 0.0
         self.min_y = min((spr.y * spr.scale for spr in self.sprites), default=0)
+        if self.min_y < self.canvas.origin.y:
+            self.min_y = self.canvas.origin.y
         for i, spr in enumerate(self.sprites):
             nx = spr.draw(self.canvas, x, self)
             if spr in self.selection:
