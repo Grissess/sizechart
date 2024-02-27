@@ -1366,9 +1366,10 @@ class App:
                             pyglet.image.load(self.buffer),
                             self.buffer,
                         )
-                    except FileNotFoundError as e:
+                    except (FileNotFoundError, pyglet.image.ImageDecodeException) as e:
                         traceback.print_exc()
                         self.message = repr(e)
+                        self.keystate = self.ks_default
                         return
                 if self.selection_is(Sprite):
                     try:
