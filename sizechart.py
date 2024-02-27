@@ -387,9 +387,8 @@ class Sprite:
 
         canv.draw_text(
             self.name,
-            Vec2(x + self.sprite.width / 2, app.min_y),
+            Vec2(x, app.min_y),
             color = self.avg_col,
-            anchor_x = 'center',
         )
 
         return x + self.sprite.width * self.olap
